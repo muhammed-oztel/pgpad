@@ -41,6 +41,10 @@ import { oneDark } from '@codemirror/theme-one-dark';
 import { highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view';
 import { highlightSelectionMatches } from '@codemirror/search';
 
+const MIN_FONT_SIZE = 8;
+const MAX_FONT_SIZE = 36;
+const DEFAULT_FONT_SIZE = 13;
+
 function createThemeExtensions(theme: 'light' | 'dark') {
 	if (theme === 'light') {
 		return [syntaxHighlighting(defaultHighlightStyle, { fallback: true })];
@@ -116,7 +120,6 @@ function createTheme(theme: 'light' | 'dark') {
 				borderBottom: 'none',
 				borderLeft: 'none',
 				minHeight: '100%',
-				fontSize: '13px',
 				margin: '0',
 				padding: '0',
 				borderTopRightRadius: '0',
@@ -127,7 +130,6 @@ function createTheme(theme: 'light' | 'dark') {
 			},
 			'.cm-lineNumbers': {
 				minHeight: '100%',
-				fontSize: '12px',
 				margin: '0',
 				padding: '0 0px 0 6px'
 			},
@@ -489,7 +491,7 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		onExecuteSelection,
 		disabled = false,
 		schema = null,
-		initialFontSize = 13
+		initialFontSize = DEFAULT_FONT_SIZE
 	} = options;
 
 	// TODO(vini): is this right?
@@ -500,16 +502,23 @@ export function createEditorInstance(options: CreateEditorOptions) {
 	}
 
 	let currentSchema = schema;
-	let currentFontSize = initialFontSize;
-
-	const MIN_FONT_SIZE = 8;
-	const MAX_FONT_SIZE = 36;
+	let currentFontSize = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, initialFontSize));
 
 	// Create compartments for dynamic reconfiguration
 	const themeCompartment = new Compartment();
 	const readOnlyCompartment = new Compartment();
 	const schemaCompartment = new Compartment();
 	const fontSizeCompartment = new Compartment();
+
+	const applyFontSize = (newSize: number) => {
+		const clampedSize = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, newSize));
+		if (clampedSize !== currentFontSize) {
+			currentFontSize = clampedSize;
+			view.dispatch({
+				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+			});
+		}
+	};
 
 	const extensions: Extension[] = [
 		keymap.of([
@@ -541,26 +550,16 @@ export function createEditorInstance(options: CreateEditorOptions) {
 			{
 				key: 'Ctrl-+',
 				mac: 'Cmd-+',
-				run: (view: EditorView) => {
-					if (currentFontSize < MAX_FONT_SIZE) {
-						currentFontSize += 1;
-						view.dispatch({
-							effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
-						});
-					}
+				run: () => {
+					applyFontSize(currentFontSize + 1);
 					return true;
 				}
 			},
 			{
 				key: 'Ctrl--',
 				mac: 'Cmd--',
-				run: (view: EditorView) => {
-					if (currentFontSize > MIN_FONT_SIZE) {
-						currentFontSize -= 1;
-						view.dispatch({
-							effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
-						});
-					}
+				run: () => {
+					applyFontSize(currentFontSize - 1);
 					return true;
 				}
 			},
@@ -661,30 +660,11 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		});
 	};
 
-	const zoomIn = () => {
-		if (currentFontSize < MAX_FONT_SIZE) {
-			currentFontSize += 1;
-			view.dispatch({
-				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
-			});
-		}
-	};
+	const zoomIn = () => applyFontSize(currentFontSize + 1);
 
-	const zoomOut = () => {
-		if (currentFontSize > MIN_FONT_SIZE) {
-			currentFontSize -= 1;
-			view.dispatch({
-				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
-			});
-		}
-	};
+	const zoomOut = () => applyFontSize(currentFontSize - 1);
 
-	const setFontSize = (size: number) => {
-		currentFontSize = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, size));
-		view.dispatch({
-			effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
-		});
-	};
+	const setFontSize = (size: number) => applyFontSize(size);
 
 	const unregisterThemeCallback = registerEditorThemeCallback(updateTheme);
 
