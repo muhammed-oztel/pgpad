@@ -455,6 +455,20 @@ function createSqlAutocompletion(schema: DatabaseSchema | null) {
 	});
 }
 
+function createFontSizeTheme(size: number) {
+	return EditorView.theme({
+		'.cm-content': {
+			fontSize: `${size}px`
+		},
+		'.cm-gutters': {
+			fontSize: `${size}px`
+		},
+		'.cm-lineNumbers': {
+			fontSize: `${size - 1}px`
+		}
+	});
+}
+
 export interface CreateEditorOptions {
 	container: HTMLElement;
 	value: string;
@@ -463,6 +477,7 @@ export interface CreateEditorOptions {
 	onExecuteSelection?: (selectedText: string) => void;
 	disabled?: boolean;
 	schema?: DatabaseSchema | null;
+	initialFontSize?: number;
 }
 
 export function createEditorInstance(options: CreateEditorOptions) {
@@ -473,7 +488,8 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		onExecute,
 		onExecuteSelection,
 		disabled = false,
-		schema = null
+		schema = null,
+		initialFontSize = 13
 	} = options;
 
 	// TODO(vini): is this right?
@@ -484,11 +500,16 @@ export function createEditorInstance(options: CreateEditorOptions) {
 	}
 
 	let currentSchema = schema;
+	let currentFontSize = initialFontSize;
+
+	const MIN_FONT_SIZE = 8;
+	const MAX_FONT_SIZE = 36;
 
 	// Create compartments for dynamic reconfiguration
 	const themeCompartment = new Compartment();
 	const readOnlyCompartment = new Compartment();
 	const schemaCompartment = new Compartment();
+	const fontSizeCompartment = new Compartment();
 
 	const extensions: Extension[] = [
 		keymap.of([
@@ -514,6 +535,32 @@ export function createEditorInstance(options: CreateEditorOptions) {
 				mac: 'Cmd-r',
 				run: () => {
 					onExecute?.();
+					return true;
+				}
+			},
+			{
+				key: 'Ctrl-+',
+				mac: 'Cmd-+',
+				run: (view: EditorView) => {
+					if (currentFontSize < MAX_FONT_SIZE) {
+						currentFontSize += 1;
+						view.dispatch({
+							effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+						});
+					}
+					return true;
+				}
+			},
+			{
+				key: 'Ctrl--',
+				mac: 'Cmd--',
+				run: (view: EditorView) => {
+					if (currentFontSize > MIN_FONT_SIZE) {
+						currentFontSize -= 1;
+						view.dispatch({
+							effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+						});
+					}
 					return true;
 				}
 			},
@@ -564,7 +611,8 @@ export function createEditorInstance(options: CreateEditorOptions) {
 			}
 		}),
 		themeCompartment.of([createTheme(currentTheme), ...createThemeExtensions(currentTheme)]),
-		readOnlyCompartment.of(disabled ? EditorState.readOnly.of(true) : [])
+		readOnlyCompartment.of(disabled ? EditorState.readOnly.of(true) : []),
+		fontSizeCompartment.of(createFontSizeTheme(currentFontSize))
 	];
 
 	const state = EditorState.create({
@@ -613,6 +661,31 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		});
 	};
 
+	const zoomIn = () => {
+		if (currentFontSize < MAX_FONT_SIZE) {
+			currentFontSize += 1;
+			view.dispatch({
+				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+			});
+		}
+	};
+
+	const zoomOut = () => {
+		if (currentFontSize > MIN_FONT_SIZE) {
+			currentFontSize -= 1;
+			view.dispatch({
+				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+			});
+		}
+	};
+
+	const setFontSize = (size: number) => {
+		currentFontSize = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, size));
+		view.dispatch({
+			effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+		});
+	};
+
 	const unregisterThemeCallback = registerEditorThemeCallback(updateTheme);
 
 	const getExecutableText = () => {
@@ -653,6 +726,10 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		updateSchema,
 		saveState,
 		restoreState,
+		zoomIn,
+		zoomOut,
+		setFontSize,
+		getFontSize: () => currentFontSize,
 		dispose: () => {
 			unregisterThemeCallback();
 			view.destroy();
