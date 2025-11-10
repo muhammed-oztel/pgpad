@@ -24,6 +24,7 @@ import { indentWithTab, history, historyKeymap, defaultKeymap } from '@codemirro
 
 import type { DatabaseSchema } from './commands.svelte';
 import { registerEditorThemeCallback, theme } from './stores/theme';
+import { fontSize, fontSizeUtils } from './stores/fontSize';
 import { get } from 'svelte/store';
 
 interface ExtendedCompletion extends Completion {
@@ -40,10 +41,6 @@ import {
 import { oneDark } from '@codemirror/theme-one-dark';
 import { highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view';
 import { highlightSelectionMatches } from '@codemirror/search';
-
-const MIN_FONT_SIZE = 8;
-const MAX_FONT_SIZE = 36;
-const DEFAULT_FONT_SIZE = 13;
 
 function createThemeExtensions(theme: 'light' | 'dark') {
 	if (theme === 'light') {
@@ -479,7 +476,6 @@ export interface CreateEditorOptions {
 	onExecuteSelection?: (selectedText: string) => void;
 	disabled?: boolean;
 	schema?: DatabaseSchema | null;
-	initialFontSize?: number;
 }
 
 export function createEditorInstance(options: CreateEditorOptions) {
@@ -490,8 +486,7 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		onExecute,
 		onExecuteSelection,
 		disabled = false,
-		schema = null,
-		initialFontSize = DEFAULT_FONT_SIZE
+		schema = null
 	} = options;
 
 	// TODO(vini): is this right?
@@ -502,23 +497,13 @@ export function createEditorInstance(options: CreateEditorOptions) {
 	}
 
 	let currentSchema = schema;
-	let currentFontSize = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, initialFontSize));
+	let currentFontSize = get(fontSize);
 
 	// Create compartments for dynamic reconfiguration
 	const themeCompartment = new Compartment();
 	const readOnlyCompartment = new Compartment();
 	const schemaCompartment = new Compartment();
 	const fontSizeCompartment = new Compartment();
-
-	const applyFontSize = (newSize: number) => {
-		const clampedSize = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, newSize));
-		if (clampedSize !== currentFontSize) {
-			currentFontSize = clampedSize;
-			view.dispatch({
-				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
-			});
-		}
-	};
 
 	const extensions: Extension[] = [
 		keymap.of([
@@ -551,7 +536,7 @@ export function createEditorInstance(options: CreateEditorOptions) {
 				key: 'Ctrl-+',
 				mac: 'Cmd-+',
 				run: () => {
-					applyFontSize(currentFontSize + 1);
+					fontSizeUtils.increase();
 					return true;
 				}
 			},
@@ -559,7 +544,7 @@ export function createEditorInstance(options: CreateEditorOptions) {
 				key: 'Ctrl--',
 				mac: 'Cmd--',
 				run: () => {
-					applyFontSize(currentFontSize - 1);
+					fontSizeUtils.decrease();
 					return true;
 				}
 			},
@@ -642,6 +627,11 @@ export function createEditorInstance(options: CreateEditorOptions) {
 
 	const restoreState = (savedState: EditorState) => {
 		view.setState(savedState);
+		const sharedFontSize = get(fontSize);
+		currentFontSize = sharedFontSize;
+		view.dispatch({
+			effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+		});
 	};
 
 	const updateDisabled = (isDisabled: boolean) => {
@@ -660,13 +650,32 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		});
 	};
 
-	const zoomIn = () => applyFontSize(currentFontSize + 1);
+	const zoomIn = () => fontSizeUtils.increase();
 
-	const zoomOut = () => applyFontSize(currentFontSize - 1);
+	const zoomOut = () => fontSizeUtils.decrease();
 
-	const setFontSize = (size: number) => applyFontSize(size);
+	const setFontSize = (size: number) => fontSizeUtils.set(size);
+
+	const syncFontSize = () => {
+		const sharedFontSize = get(fontSize);
+		if (sharedFontSize !== currentFontSize) {
+			currentFontSize = sharedFontSize;
+			view.dispatch({
+				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+			});
+		}
+	};
 
 	const unregisterThemeCallback = registerEditorThemeCallback(updateTheme);
+
+	const unsubscribeFontSize = fontSize.subscribe((newSize) => {
+		if (newSize !== currentFontSize) {
+			currentFontSize = newSize;
+			view.dispatch({
+				effects: fontSizeCompartment.reconfigure(createFontSizeTheme(currentFontSize))
+			});
+		}
+	});
 
 	const getExecutableText = () => {
 		const selection = view.state.selection.main;
@@ -709,9 +718,11 @@ export function createEditorInstance(options: CreateEditorOptions) {
 		zoomIn,
 		zoomOut,
 		setFontSize,
+		syncFontSize,
 		getFontSize: () => currentFontSize,
 		dispose: () => {
 			unregisterThemeCallback();
+			unsubscribeFontSize();
 			view.destroy();
 		}
 	};
