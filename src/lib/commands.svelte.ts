@@ -18,7 +18,7 @@ export interface StatementInfo {
 }
 
 export type DatabaseInfo =
-	| { Postgres: { connection_string: string } }
+	| { Postgres: { connection_string: string; ca_cert_path?: string | null } }
 	| { SQLite: { db_path: string } };
 
 export interface ConnectionInfo {
@@ -199,12 +199,16 @@ export class Commands {
 		return await invoke('save_sqlite_db');
 	}
 
-	static async startQuery(connectionId: string, query: string): Promise<QueryId[]> {
-		return await invoke('start_query', { connectionId, query });
+	static async pickCaCert(): Promise<string | null> {
+		return await invoke('pick_ca_cert');
 	}
 
-	static async fetchQuery(queryId: QueryId): Promise<StatementInfo> {
-		return await invoke('fetch_query', { queryId });
+	static async submitQuery(connectionId: string, query: string): Promise<QueryId[]> {
+		return await invoke('submit_query', { connectionId, query });
+	}
+
+	static async waitUntilRenderable(queryId: QueryId): Promise<StatementInfo> {
+		return await invoke('wait_until_renderable', { queryId });
 	}
 
 	static async fetchPage(queryId: QueryId, pageIndex: number): Promise<Page | null> {

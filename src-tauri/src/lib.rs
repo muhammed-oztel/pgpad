@@ -64,11 +64,10 @@ pub fn run() {
         .manage(certificates)
         .setup(|app| {
             if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+                env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+                    "trace,tokio_postgres=info,tao=info,sqlparser=info,rustls=info",
+                ))
+                .init();
             }
 
             init::build_window(app)?;
@@ -85,8 +84,8 @@ pub fn run() {
             database::commands::update_connection,
             database::commands::connect_to_database,
             database::commands::disconnect_from_database,
-            database::commands::start_query,
-            database::commands::fetch_query,
+            database::commands::submit_query,
+            database::commands::wait_until_renderable,
             database::commands::fetch_page,
             database::commands::get_query_status,
             database::commands::get_page_count,
@@ -108,6 +107,7 @@ pub fn run() {
             window::commands::close_window,
             window::commands::open_sqlite_db,
             window::commands::save_sqlite_db,
+            window::commands::pick_ca_cert,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
