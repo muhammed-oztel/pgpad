@@ -34,6 +34,7 @@ pub struct QuerySnapshot {
 pub enum Database {
     Postgres,
     Sqlite,
+    ClickHouse,
 }
 
 #[repr(u8)]
@@ -101,6 +102,9 @@ pub enum ConnectionConfig {
     SQLite {
         db_path: String,
     },
+    ClickHouse {
+        connection_string: String,
+    },
 }
 
 #[derive(Debug)]
@@ -120,6 +124,9 @@ pub enum RuntimeClient {
     SQLite {
         connection: Arc<Mutex<rusqlite::Connection>>,
     },
+    ClickHouse {
+        client: Arc<crate::database::clickhouse::connect::ClickHouseClient>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +140,7 @@ impl ConnectionConfig {
         match self {
             ConnectionConfig::Postgres { .. } => Database::Postgres,
             ConnectionConfig::SQLite { .. } => Database::Sqlite,
+            ConnectionConfig::ClickHouse { .. } => Database::ClickHouse,
         }
     }
 }
@@ -173,6 +181,11 @@ impl Connection {
             ConnectionRuntime::Connected(RuntimeClient::SQLite { connection }) => {
                 RuntimeClient::SQLite {
                     connection: connection.clone(),
+                }
+            }
+            ConnectionRuntime::Connected(RuntimeClient::ClickHouse { client }) => {
+                RuntimeClient::ClickHouse {
+                    client: client.clone(),
                 }
             }
             ConnectionRuntime::Disconnected => {

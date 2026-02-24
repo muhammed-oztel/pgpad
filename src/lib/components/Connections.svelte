@@ -5,6 +5,7 @@
 	import type { SvelteSet } from 'svelte/reactivity';
 	import IconCibPostgresql from '~icons/cib/postgresql';
 	import IconSimpleIconsSqlite from '~icons/simple-icons/sqlite';
+	import IconSimpleIconsClickhouse from '~icons/simple-icons/clickhouse';
 	import Button from './ui/button/button.svelte';
 
 	interface Props {
@@ -196,6 +197,8 @@
 
 							{#if 'Postgres' in connection.config}
 								<IconCibPostgresql class="h-4 w-4" />
+							{:else if 'ClickHouse' in connection.config}
+								<IconSimpleIconsClickhouse class="h-4 w-4" />
 							{:else if 'SQLite' in connection.config}
 								<IconSimpleIconsSqlite class="h-4 w-4" />
 							{/if}
@@ -208,6 +211,10 @@
 								{#if 'Postgres' in connection.config}
 									{connection.config.Postgres.connection_string
 										.replace(/^postgresql?:\/\/[^@]*@/, '')
+										.replace(/\/[^?]*/, '')}
+								{:else if 'ClickHouse' in connection.config}
+									{connection.config.ClickHouse.connection_string
+										.replace(/^clickhouses?:\/\/[^@]*@/, '')
 										.replace(/\/[^?]*/, '')}
 								{:else if 'SQLite' in connection.config}
 									{connection.config.SQLite.db_path.split('/').pop() ||

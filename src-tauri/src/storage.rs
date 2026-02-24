@@ -9,6 +9,7 @@ use uuid::Uuid;
 // Gotta match the IDs in the DB
 const DB_TYPE_POSTGRES: i32 = 1;
 const DB_TYPE_SQLITE: i32 = 2;
+const DB_TYPE_CLICKHOUSE: i32 = 3;
 
 use crate::{
     database::types::{ConnectionConfig, ConnectionInfo, Permissions},
@@ -26,6 +27,7 @@ impl Migrator {
                 include_str!("../migrations/001.sql"),
                 include_str!("../migrations/002.sql"),
                 include_str!("../migrations/003.sql"),
+                include_str!("../migrations/004.sql"),
             ],
         }
     }
@@ -163,12 +165,15 @@ impl Storage {
                 ca_cert_path.as_deref(),
             ),
             ConnectionConfig::SQLite { db_path } => (DB_TYPE_SQLITE, db_path.as_str(), None),
+            ConnectionConfig::ClickHouse {
+                connection_string, ..
+            } => (DB_TYPE_CLICKHOUSE, connection_string.as_str(), None),
         };
 
         conn.execute(
-            "INSERT OR REPLACE INTO connections 
-             (id, name, connection_data, database_type_id, ca_cert_path, permissions, created_at, updated_at, sort_order) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 
+            "INSERT OR REPLACE INTO connections
+             (id, name, connection_data, database_type_id, ca_cert_path, permissions, created_at, updated_at, sort_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                 (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM connections))",
             (
                 &connection.id.to_string(),
@@ -200,11 +205,14 @@ impl Storage {
                 ca_cert_path.as_deref(),
             ),
             ConnectionConfig::SQLite { db_path } => (DB_TYPE_SQLITE, db_path.as_str(), None),
+            ConnectionConfig::ClickHouse {
+                connection_string, ..
+            } => (DB_TYPE_CLICKHOUSE, connection_string.as_str(), None),
         };
 
         let updated_rows = conn
             .execute(
-                "UPDATE connections 
+                "UPDATE connections
              SET name = ?2, connection_data = ?3, database_type_id = ?4, ca_cert_path = ?5, permissions = ?6, updated_at = ?7
              WHERE id = ?1",
                 (
@@ -258,6 +266,9 @@ impl Storage {
                     },
                     "sqlite" => ConnectionConfig::SQLite {
                         db_path: connection_data,
+                    },
+                    "clickhouse" => ConnectionConfig::ClickHouse {
+                        connection_string: connection_data,
                     },
                     _ => ConnectionConfig::Postgres {
                         connection_string: connection_data, // Default to postgres for unknown types

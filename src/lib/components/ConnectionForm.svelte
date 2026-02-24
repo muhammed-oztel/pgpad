@@ -14,6 +14,7 @@
 
 	import IconCibPostgresql from '~icons/cib/postgresql';
 	import IconSimpleIconsSqlite from '~icons/simple-icons/sqlite';
+	import IconSimpleIconsClickhouse from '~icons/simple-icons/clickhouse';
 
 	import {
 		Commands,
@@ -34,10 +35,11 @@
 	let connectionName = $state(editingConnection?.name || '');
 	let permissions = $state<Permissions>(editingConnection?.permissions || 'read_write');
 
-	let databaseType = $state<'postgres' | 'sqlite'>('postgres');
+	let databaseType = $state<'postgres' | 'sqlite' | 'clickhouse'>('postgres');
 	let connectionString = $state('');
 	let caCertPath = $state<string>('');
 	let sqliteFilePath = $state('');
+	let clickhouseConnectionString = $state('');
 
 	if (editingConnection) {
 		if ('Postgres' in editingConnection.config) {
@@ -47,6 +49,9 @@
 		} else if ('SQLite' in editingConnection.config) {
 			databaseType = 'sqlite';
 			sqliteFilePath = editingConnection.config.SQLite.db_path;
+		} else if ('ClickHouse' in editingConnection.config) {
+			databaseType = 'clickhouse';
+			clickhouseConnectionString = editingConnection.config.ClickHouse.connection_string;
 		}
 	}
 	let errors = $state<Record<string, string>>({});
@@ -70,6 +75,10 @@
 
 		if (databaseType === 'sqlite' && !sqliteFilePath.trim()) {
 			errors.sqliteFilePath = 'SQLite database file is required';
+		}
+
+		if (databaseType === 'clickhouse' && !clickhouseConnectionString.trim()) {
+			errors.clickhouseConnectionString = 'Connection string is required';
 		}
 
 		return Object.keys(errors).length === 0;
@@ -122,24 +131,33 @@
 		caCertPath = '';
 	}
 
+	function buildConfig(): ConnectionConfig {
+		if (databaseType === 'postgres') {
+			return {
+				Postgres: {
+					connection_string: connectionString.trim(),
+					ca_cert_path: caCertPath.trim() || null
+				}
+			};
+		} else if (databaseType === 'clickhouse') {
+			return {
+				ClickHouse: {
+					connection_string: clickhouseConnectionString.trim()
+				}
+			};
+		} else {
+			return { SQLite: { db_path: sqliteFilePath.trim() } };
+		}
+	}
+
 	async function testConnection() {
 		if (!validateForm()) return;
 
 		isTestingConnection = true;
 		testResult = null;
 
-		const config: ConnectionConfig =
-			databaseType === 'postgres'
-				? {
-						Postgres: {
-							connection_string: connectionString.trim(),
-							ca_cert_path: caCertPath.trim() || null
-						}
-					}
-				: { SQLite: { db_path: sqliteFilePath.trim() } };
-
 		try {
-			const success = await Commands.testConnection(config);
+			const success = await Commands.testConnection(buildConfig());
 			testResult = success ? 'success' : 'error';
 		} catch (error) {
 			console.error('Connection test failed:', error);
@@ -153,17 +171,7 @@
 		e.preventDefault();
 
 		if (validateForm()) {
-			const config: ConnectionConfig =
-				databaseType === 'postgres'
-					? {
-							Postgres: {
-								connection_string: connectionString.trim(),
-								ca_cert_path: caCertPath.trim() || null
-							}
-						}
-					: { SQLite: { db_path: sqliteFilePath.trim() } };
-
-			onSubmit(connectionName.trim(), config, permissions);
+			onSubmit(connectionName.trim(), buildConfig(), permissions);
 		}
 	}
 </script>
@@ -266,13 +274,20 @@
 			</div>
 
 			<Tabs.Root bind:value={databaseType} class="w-full">
-				<Tabs.List class="bg-muted/20 grid w-full grid-cols-2 gap-1 rounded-lg p-1">
+				<Tabs.List class="bg-muted/20 grid w-full grid-cols-3 gap-1 rounded-lg p-1">
 					<Tabs.Trigger
 						value="postgres"
 						class="data-[state=inactive]:hover:bg-muted/30 data-[state=inactive]:text-muted-foreground flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition-all duration-200 data-[state=active]:bg-[var(--border)] data-[state=active]:shadow-lg"
 					>
 						<IconCibPostgresql class="h-4 w-4" />
 						PostgreSQL
+					</Tabs.Trigger>
+					<Tabs.Trigger
+						value="clickhouse"
+						class="data-[state=inactive]:hover:bg-muted/30 data-[state=inactive]:text-muted-foreground flex items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition-all duration-200 data-[state=active]:bg-[var(--border)] data-[state=active]:shadow-lg"
+					>
+						<IconSimpleIconsClickhouse class="h-4 w-4" />
+						ClickHouse
 					</Tabs.Trigger>
 					<Tabs.Trigger
 						value="sqlite"
@@ -350,6 +365,45 @@
 										</p>
 									</div>
 								</div>
+							</div>
+						</div>
+					</div>
+				</Tabs.Content>
+
+				<Tabs.Content value="clickhouse" class="mt-3">
+					<div class="bg-card rounded-xl border p-5 shadow-sm">
+						<label
+							for="clickhouseConnectionString"
+							class="text-foreground mb-2 block text-sm font-semibold"
+						>
+							Connection String <span class="text-error">*</span>
+						</label>
+						<Input
+							id="clickhouseConnectionString"
+							type="text"
+							bind:value={clickhouseConnectionString}
+							placeholder="clickhouse://default:password@localhost:8123/default"
+							class={`shadow-sm transition-shadow focus:shadow-md ${errors.clickhouseConnectionString ? 'border-error focus:ring-error/30' : 'focus:ring-primary/30'}`}
+						/>
+						{#if errors.clickhouseConnectionString}
+							<p class="text-error mt-2 flex items-center gap-2 text-sm">
+								<AlertCircle class="h-4 w-4" />
+								{errors.clickhouseConnectionString}
+							</p>
+						{/if}
+
+						<div class="bg-muted/20 border-muted/40 mt-3 rounded-lg border p-2.5">
+							<div class="flex items-start gap-2">
+								<Info class="text-muted-foreground mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+								<p class="text-muted-foreground text-xs leading-relaxed">
+									Use <span class="text-foreground font-medium">clickhouse://</span> for HTTP
+									connections (port 8123) or
+									<span class="text-foreground font-medium">clickhouses://</span> for HTTPS.
+									Format:
+									<span class="text-foreground font-medium"
+										>clickhouse://user:password@host:port/database</span
+									>
+								</p>
 							</div>
 						</div>
 					</div>

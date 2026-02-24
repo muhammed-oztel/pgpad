@@ -11,6 +11,7 @@ use dashmap::DashMap;
 
 use crate::{
     database::{
+        clickhouse,
         parser::ParsedStatement,
         postgres, sqlite,
         types::{channel, Page, QueryId, QuerySnapshot, QueryStatus, RuntimeClient},
@@ -64,12 +65,11 @@ impl StatementManager {
     pub fn submit_query(&self, client: RuntimeClient, query: &str) -> Result<Vec<QueryId>, Error> {
         self.queries.clear();
 
-        let parse_statements = match &client {
-            RuntimeClient::Postgres { .. } => postgres::parser::parse_statements,
-            RuntimeClient::SQLite { .. } => sqlite::parser::parse_statements,
+        let statements = match &client {
+            RuntimeClient::Postgres { .. } => postgres::parser::parse_statements(query)?,
+            RuntimeClient::SQLite { .. } => sqlite::parser::parse_statements(query)?,
+            RuntimeClient::ClickHouse { .. } => clickhouse::parser::parse_statements(query)?,
         };
-
-        let statements = parse_statements(query)?;
         let mut query_ids = Vec::with_capacity(statements.len());
 
         for (idx, statement) in statements.into_iter().enumerate() {
@@ -161,6 +161,15 @@ impl StatementManager {
                     let conn = connection.lock().unwrap();
                     if let Err(err) = sqlite::execute::execute_query(&conn, stmt, &sender) {
                         log::error!("Error executing SQLite query: {}", err);
+                    }
+                });
+            }
+            RuntimeClient::ClickHouse { client } => {
+                spawn(async move {
+                    if let Err(err) =
+                        clickhouse::execute::execute_query(&client, stmt, &sender).await
+                    {
+                        log::error!("Error executing ClickHouse query: {}", err);
                     }
                 });
             }
