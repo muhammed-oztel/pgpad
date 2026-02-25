@@ -86,6 +86,13 @@
 			{#if activeTab}
 				{#if activeTab.columns && activeTab.currentPageData && activeTab.currentPageData.length > 0}
 					<div class="relative flex min-h-0 flex-1 flex-col">
+						{#if activeTab.truncated}
+							<div
+								class="border-border/30 flex flex-shrink-0 items-center gap-2 border-b bg-amber-50 px-3 py-1.5 text-xs text-amber-700 dark:bg-amber-950/30 dark:text-amber-400"
+							>
+								<span>Results limited to 1,000 rows. Add a LIMIT clause to your query to see more or fewer rows.</span>
+							</div>
+						{/if}
 						<CardContent class="flex h-full min-h-0 flex-1 flex-col overflow-hidden p-0">
 							<Table
 								data={activeTab.currentPageData}

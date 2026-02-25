@@ -16,6 +16,8 @@ export interface QuerySnapshot {
 	affected_rows: number | null;
 	columns: string[] | null;
 	error: string | null;
+	/** True when results were cut off at the default row limit (query had no LIMIT clause) */
+	truncated: boolean;
 }
 
 export type ConnectionConfig =

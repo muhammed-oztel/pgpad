@@ -9,13 +9,17 @@ use crate::{
     Error,
 };
 
+/// Default maximum rows returned when the query has no explicit LIMIT clause.
+const DEFAULT_LIMIT: usize = 1000;
+
 pub async fn execute_query(
     client: &Client,
     stmt: ParsedStatement,
     sender: &ExecSender,
 ) -> Result<(), Error> {
     if stmt.returns_values {
-        execute_query_with_results(client, &stmt.statement, sender).await?;
+        execute_query_with_results(client, &stmt.statement, stmt.has_explicit_limit, sender)
+            .await?;
     } else {
         execute_modification_query(client, &stmt.statement, sender).await?;
     }
@@ -26,6 +30,7 @@ pub async fn execute_query(
 async fn execute_query_with_results(
     client: &Client,
     query: &str,
+    has_explicit_limit: bool,
     sender: &ExecSender,
 ) -> Result<(), Error> {
     let started_at = std::time::Instant::now();
@@ -47,6 +52,7 @@ async fn execute_query_with_results(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: 0,
                 error: Some(error_msg.clone()),
+                truncated: false,
             })?;
 
             return Err(Error::Any(anyhow::anyhow!(error_msg)));
@@ -64,6 +70,7 @@ async fn execute_query_with_results(
 
             let batch_size = 50;
             let mut total_rows = 0;
+            let mut truncated = false;
 
             let mut writer = RowWriter::new();
 
@@ -73,6 +80,18 @@ async fn execute_query_with_results(
                         writer.add_row(&row)?;
 
                         total_rows += 1;
+
+                        // Stop streaming once we hit the default limit (unless user specified their own)
+                        if !has_explicit_limit && total_rows >= DEFAULT_LIMIT {
+                            truncated = true;
+                            if !writer.is_empty() {
+                                sender.send(QueryExecEvent::Page {
+                                    page_amount: writer.len(),
+                                    page: writer.finish(),
+                                })?;
+                            }
+                            break;
+                        }
 
                         if writer.len() >= batch_size {
                             sender.send(QueryExecEvent::Page {
@@ -93,6 +112,7 @@ async fn execute_query_with_results(
                             elapsed_ms: started_at.elapsed().as_millis() as u64,
                             affected_rows: 0,
                             error: Some(error_msg.clone()),
+                            truncated: false,
                         })?;
 
                         return Err(Error::Any(anyhow::anyhow!(error_msg)));
@@ -113,12 +133,14 @@ async fn execute_query_with_results(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: 0,
                 error: None,
+                truncated,
             })?;
 
             log::info!(
-                "Streaming query completed: {} rows in {}ms",
+                "Streaming query completed: {} rows in {}ms{}",
                 total_rows,
-                duration
+                duration,
+                if truncated { " (truncated)" } else { "" }
             );
 
             Ok(())
@@ -131,6 +153,7 @@ async fn execute_query_with_results(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: 0,
                 error: Some(error_msg.clone()),
+                truncated: false,
             })?;
 
             Err(Error::Any(anyhow::anyhow!(error_msg)))
@@ -152,6 +175,7 @@ async fn execute_modification_query(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: rows_affected as usize,
                 error: None,
+                truncated: false,
             })?;
 
             Ok(())
@@ -164,6 +188,7 @@ async fn execute_modification_query(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: 0,
                 error: Some(error_msg.clone()),
+                truncated: false,
             })?;
 
             Err(Error::Any(anyhow::anyhow!(error_msg)))
@@ -320,6 +345,7 @@ mod tests {
                 elapsed_ms,
                 affected_rows,
                 error,
+                ..
             } => {
                 let _ = elapsed_ms;
                 assert!(error.is_none());

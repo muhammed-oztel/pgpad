@@ -10,6 +10,9 @@ use crate::{
     Error,
 };
 
+/// Default maximum rows returned when the query has no explicit LIMIT clause.
+const DEFAULT_LIMIT: usize = 1000;
+
 /// Make sure to run this on a task where blocking is allowed.
 pub fn execute_query(
     client: &Connection,
@@ -19,7 +22,7 @@ pub fn execute_query(
     let start = std::time::Instant::now();
 
     if stmt.returns_values {
-        execute_query_with_results(client, &stmt.statement, sender, start)?;
+        execute_query_with_results(client, &stmt.statement, stmt.has_explicit_limit, sender, start)?;
     } else {
         execute_modification_query(client, &stmt.statement, sender, start)?;
     }
@@ -30,6 +33,7 @@ pub fn execute_query(
 fn execute_query_with_results(
     client: &Connection,
     query: &str,
+    has_explicit_limit: bool,
     sender: &ExecSender,
     started_at: Instant,
 ) -> Result<(), Error> {
@@ -53,12 +57,25 @@ fn execute_query_with_results(
                     // TODO: make this configurable
                     let batch_size = 50;
                     let mut writer = RowWriter::new(column_types);
+                    let mut truncated = false;
 
                     loop {
                         match rows.next() {
                             Ok(Some(row)) => {
                                 writer.add_row(row)?;
                                 total_rows += 1;
+
+                                // Stop consuming rows once we hit the default limit
+                                if !has_explicit_limit && total_rows >= DEFAULT_LIMIT {
+                                    truncated = true;
+                                    if !writer.is_empty() {
+                                        sender.send(QueryExecEvent::Page {
+                                            page_amount: writer.len(),
+                                            page: writer.finish(),
+                                        })?;
+                                    }
+                                    break;
+                                }
 
                                 if writer.len() >= batch_size {
                                     sender.send(QueryExecEvent::Page {
@@ -81,6 +98,7 @@ fn execute_query_with_results(
                                     //             Might not matter, though
                                     affected_rows: 0,
                                     error: Some(error_msg),
+                                    truncated: false,
                                 })?;
                             }
                         }
@@ -95,15 +113,17 @@ fn execute_query_with_results(
 
                     let duration = started_at.elapsed().as_millis() as u64;
                     log::info!(
-                        "SQLite query completed: {} rows in {}ms",
+                        "SQLite query completed: {} rows in {}ms{}",
                         total_rows,
-                        duration
+                        duration,
+                        if truncated { " (truncated)" } else { "" }
                     );
 
                     sender.send(QueryExecEvent::Finished {
                         elapsed_ms: started_at.elapsed().as_millis() as u64,
                         affected_rows: 0,
                         error: None,
+                        truncated,
                     })?;
 
                     Ok(())
@@ -116,6 +136,7 @@ fn execute_query_with_results(
                         elapsed_ms: started_at.elapsed().as_millis() as u64,
                         affected_rows: 0,
                         error: Some(error_msg.clone()),
+                        truncated: false,
                     })?;
 
                     // TODO(vini): is this necessary, if we already sent the error to the receiver thread?
@@ -131,6 +152,7 @@ fn execute_query_with_results(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: 0,
                 error: Some(error_msg.clone()),
+                truncated: false,
             })?;
 
             Err(Error::Any(anyhow::anyhow!(error_msg)))
@@ -152,6 +174,7 @@ fn execute_modification_query(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: rows_affected,
                 error: None,
+                truncated: false,
             })?;
             Ok(())
         }
@@ -163,6 +186,7 @@ fn execute_modification_query(
                 elapsed_ms: started_at.elapsed().as_millis() as u64,
                 affected_rows: 0,
                 error: Some(error_msg.clone()),
+                truncated: false,
             })?;
 
             Err(Error::Any(anyhow::anyhow!(error_msg)))
@@ -337,6 +361,7 @@ mod tests {
                 elapsed_ms,
                 affected_rows,
                 error,
+                ..
             } => {
                 // This particular query does run fast enough in my machine to be 0ms, so it's hard to assert anything about it
                 let _ = elapsed_ms;
@@ -397,6 +422,8 @@ mod tests {
             other => panic!("Expected Page event, got {:?}", other),
         }
 
+        // The recursive query generates 155 rows, but since has_explicit_limit=false and
+        // DEFAULT_LIMIT=1000, all 155 rows fit within the limit — no truncation.
         let page_4 = events.next().unwrap();
         match page_4 {
             QueryExecEvent::Page { page_amount, page } => {

@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 
 use sqlparser::{
-    ast::{self, Statement, VisitMut, VisitorMut},
+    ast::{self, LimitClause, Statement, VisitMut, VisitorMut},
     dialect::Dialect,
     keywords::Keyword,
     parser::Parser,
@@ -13,6 +13,9 @@ pub struct ParsedStatement {
     pub statement: String,
     pub returns_values: bool,
     pub is_read_only: bool,
+    /// True if the query already contains an explicit LIMIT (or FETCH FIRST) clause.
+    /// When false, callers should apply a default row limit to avoid unbounded result sets.
+    pub has_explicit_limit: bool,
 }
 
 pub trait SqlDialectExt {
@@ -131,6 +134,22 @@ pub trait SqlDialectExt {
     }
 }
 
+/// Returns true if the statement already contains an explicit row-limiting clause
+/// (LIMIT N or FETCH FIRST N ROWS), so callers know not to apply a default limit.
+fn has_explicit_limit(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Query(query) => {
+            query.fetch.is_some()
+                || matches!(
+                    &query.limit_clause,
+                    Some(LimitClause::LimitOffset { limit: Some(_), .. })
+                        | Some(LimitClause::OffsetCommaLimit { .. })
+                )
+        }
+        _ => false,
+    }
+}
+
 pub fn parse_statements<T>(dialect: &T, query: &str) -> anyhow::Result<Vec<ParsedStatement>>
 where
     T: Dialect + SqlDialectExt,
@@ -153,6 +172,7 @@ where
             statement: statement.to_string(),
             returns_values: T::returns_values(&statement),
             is_read_only: T::is_read_only(&statement),
+            has_explicit_limit: has_explicit_limit(&statement),
         });
     }
 

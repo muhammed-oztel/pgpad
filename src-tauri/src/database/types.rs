@@ -29,6 +29,8 @@ pub struct QuerySnapshot {
     pub affected_rows: Option<usize>,
     pub columns: Option<Box<RawValue>>,
     pub error: Option<String>,
+    /// True when the result set was cut off at the default row limit because the query had no LIMIT clause.
+    pub truncated: bool,
 }
 
 pub enum Database {
@@ -250,5 +252,7 @@ pub enum QueryExecEvent {
         affected_rows: usize,
         /// If the query failed, this will contain the error message
         error: Option<String>,
+        /// True when results were cut off at the default row limit (no LIMIT in original query)
+        truncated: bool,
     },
 }

@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
     Arc, RwLock,
 };
 
@@ -32,6 +32,8 @@ struct ExecState {
     // TODO(vini): we could refactor this into an enum with a variant with `pages`, `columns`, and one with just `rows_affected`
     returns_values: bool,
     rows_affected: RwLock<Option<usize>>,
+    /// True when results were cut off by the default row limit (query had no LIMIT clause)
+    truncated: AtomicBool,
 
     /// If set, the UI can now render the results of this query,
     /// even if it's still on-going (e.g. we already have enough data to render the first page)
@@ -104,6 +106,7 @@ impl StatementManager {
             affected_rows: *exec_state.rows_affected.read().expect("RwLock poisoned"),
             error: exec_state.error.read().expect("RwLock poisoned").clone(),
             columns: exec_state.columns.read().expect("RwLock poisoned").clone(),
+            truncated: exec_state.truncated.load(Ordering::Relaxed),
         };
 
         Ok(info)
@@ -139,6 +142,7 @@ impl StatementManager {
             columns: RwLock::new(None),
             returns_values: stmt.returns_values,
             rows_affected: RwLock::new(None),
+            truncated: AtomicBool::new(false),
             renderable: Condvar::new(),
         };
 
@@ -198,6 +202,7 @@ impl StatementManager {
                         elapsed_ms: _,
                         affected_rows,
                         error,
+                        truncated,
                     } => {
                         if let Some(err) = error {
                             *exec_storage.error.write().unwrap() = Some(err);
@@ -210,6 +215,7 @@ impl StatementManager {
                                 .store(QueryStatus::Completed as u8, Ordering::Relaxed);
 
                             *exec_storage.rows_affected.write().unwrap() = Some(affected_rows);
+                            exec_storage.truncated.store(truncated, Ordering::Relaxed);
                         }
 
                         exec_storage.renderable.set();

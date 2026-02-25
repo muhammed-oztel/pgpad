@@ -21,6 +21,8 @@ export interface QueryResultTab {
 	currentPageData: Page | null;
 	totalPages: number | null;
 	error?: string;
+	/** True when results were cut off at the default 1,000-row limit (query had no LIMIT clause) */
+	truncated?: boolean;
 }
 
 export class QueryExecutor {
@@ -161,7 +163,8 @@ export class QueryExecutor {
 			name: tabName,
 			currentPageData: info.first_page,
 			status: info.status,
-			queryReturnsResults: true
+			queryReturnsResults: true,
+			truncated: info.truncated
 		};
 		this.resultTabs = [...this.resultTabs];
 
