@@ -7,6 +7,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import ThemeToggle from './ThemeToggle.svelte';
 	import { Commands } from '$lib/commands.svelte';
+	import { runtime } from '$lib/runtime';
 
 	interface Props {
 		currentConnection?: {
@@ -29,8 +30,6 @@
 		onSaveScript = () => {}
 	}: Props = $props();
 
-	const isMacOS = window.__PGPAD_INTERNAL__?.platform === 'macos';
-
 	async function minimizeWindow() {
 		await Commands.minimizeWindow();
 	}
@@ -50,7 +49,7 @@
 	data-tauri-drag-region
 >
 	<div
-		class={`flex flex-1 items-center gap-3 ${isMacOS ? 'justify-center pr-4 pl-20' : 'px-4'}`}
+		class={`flex flex-1 items-center gap-3 ${runtime.isMacOS ? 'justify-center pr-4 pl-20' : 'px-4'}`}
 		data-tauri-drag-region
 	>
 		<!-- Action buttons - NOT draggable -->
@@ -117,12 +116,12 @@
 			</div>
 		{/if}
 	</div>
-	{#if isMacOS}
+	{#if runtime.isMacOS}
 		<!-- Right section with theme toggle - NOT draggable on macOS -->
 		<div class="flex items-center pr-4">
 			<ThemeToggle size="sm" class="h-6 w-6 p-0" />
 		</div>
-	{:else}
+	{:else if runtime.showWindowControls}
 		<!-- Right section - Theme toggle and Window controls - NOT draggable -->
 		<div class="flex items-center gap-1">
 			<ThemeToggle size="sm" class="mr-1 h-7 w-7 p-0" />
@@ -152,6 +151,11 @@
 			>
 				<X class="h-3 w-3" />
 			</Button>
+		</div>
+	{:else}
+		<!-- pgpad-web fallback: right section with theme toggle, undraggable -->
+		<div class="flex items-center pr-4">
+			<ThemeToggle size="sm" class="h-7 w-7 p-0" />
 		</div>
 	{/if}
 </div>

@@ -1,9 +1,9 @@
 <script lang="ts">
 	import * as Kbd from '$lib/components/ui/kbd';
+	import { runtime } from '$lib/runtime';
 
-	const isMacOS = window.__PGPAD_INTERNAL__?.platform === 'macos';
-	const modKey = isMacOS ? '⌘' : 'Ctrl';
-	const shiftKey = isMacOS ? '⇧' : 'Shift';
+	const modKey = runtime.isMacOS ? '⌘' : 'Ctrl';
+	const shiftKey = runtime.isMacOS ? '⇧' : 'Shift';
 </script>
 
 <div class="text-muted-foreground flex flex-1 items-center justify-center">
