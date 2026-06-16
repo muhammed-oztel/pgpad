@@ -146,7 +146,7 @@ describe('QueryExecutor', () => {
 			expect(executor.resultTabs).toHaveLength(2);
 			expect(executor.resultTabs[0].queryId).toBe(1);
 			expect(executor.resultTabs[1].queryId).toBe(2);
-			expect(executor.activeResultTabId).toBe(executor.resultTabs[1].id);
+			expect(executor.activeResultTabId).toBe(executor.resultTabs[0].id);
 		});
 
 		it('should handle query execution errors gracefully', async () => {
@@ -336,13 +336,13 @@ describe('QueryExecutor', () => {
 			const firstTabId = executor.resultTabs[0].id;
 			const secondTabId = executor.resultTabs[1].id;
 
-			// active tab is the second one (last added)
-			expect(executor.activeResultTabId).toBe(secondTabId);
+			// active tab is the first result by default
+			expect(executor.activeResultTabId).toBe(firstTabId);
 
-			executor.handleResultTabClose(secondTabId);
+			executor.handleResultTabClose(firstTabId);
 
 			expect(executor.resultTabs).toHaveLength(1);
-			expect(executor.activeResultTabId).toBe(firstTabId);
+			expect(executor.activeResultTabId).toBe(secondTabId);
 		});
 
 		it('should set activeResultTabId to null when closing last tab', async () => {
