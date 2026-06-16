@@ -1,8 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{borrow::Cow, path::PathBuf, sync::Arc};
 
 use axum::{
     extract::{rejection::JsonRejection, FromRequest, Path, Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
@@ -20,9 +20,9 @@ use pgpad_core::{
 };
 use rand::distr::{Alphanumeric, SampleString};
 use rfd::FileDialog;
+use rust_embed::Embed;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::value::RawValue;
-use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -84,10 +84,7 @@ pub fn default_db_path() -> PathBuf {
         .join("pgpad.db")
 }
 
-pub fn router(static_dir: PathBuf, state: WebState) -> Router {
-    let index = static_dir.join("index.html");
-    let static_files = ServeDir::new(static_dir).fallback(ServeFile::new(index));
-
+pub fn router(state: WebState) -> Router {
     let api = Router::new()
         .route(
             "/commands/initialize_connections",
@@ -140,8 +137,53 @@ pub fn router(static_dir: PathBuf, state: WebState) -> Router {
 
     Router::new()
         .nest("/api", api)
-        .fallback_service(static_files)
+        .fallback(static_handler)
         .with_state(state)
+}
+
+pub fn has_index_html() -> bool {
+    Asset::get("index.html").is_some()
+}
+
+#[derive(Embed)]
+#[folder = "../dist"]
+struct Asset;
+
+async fn static_handler(uri: Uri) -> impl IntoResponse {
+    StaticFile::from_uri(uri)
+}
+
+struct StaticFile {
+    path: String,
+}
+
+impl StaticFile {
+    fn from_uri(uri: Uri) -> Self {
+        let path = uri.path().trim_start_matches('/');
+        let path = if path.is_empty() { "index.html" } else { path };
+
+        Self {
+            path: path.to_string(),
+        }
+    }
+
+    fn content(&self) -> Option<(Cow<'static, [u8]>, String)> {
+        let (content, served_path) = Asset::get(&self.path)
+            .map(|file| (file.data, self.path.as_str()))
+            .or_else(|| Asset::get("index.html").map(|file| (file.data, "index.html")))?;
+        let mime = mime_guess::from_path(served_path).first_or_octet_stream();
+
+        Some((content, mime.to_string()))
+    }
+}
+
+impl IntoResponse for StaticFile {
+    fn into_response(self) -> Response {
+        match self.content() {
+            Some((content, mime)) => ([(header::CONTENT_TYPE, mime)], content).into_response(),
+            None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

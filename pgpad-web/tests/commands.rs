@@ -14,16 +14,6 @@ struct TestApp {
     token: String,
 }
 
-fn make_static_dir() -> TempDir {
-    let dir = tempfile::tempdir().expect("failed to create static dir");
-    std::fs::write(
-        dir.path().join("index.html"),
-        "<!doctype html><div id=\"app\"></div>",
-    )
-    .expect("failed to write index.html");
-    dir
-}
-
 fn make_sqlite_db() -> TempDir {
     let dir = tempfile::tempdir().expect("failed to create sqlite dir");
     let db_path = dir.path().join("user.sqlite");
@@ -44,10 +34,10 @@ fn make_sqlite_db() -> TempDir {
     dir
 }
 
-fn make_app(static_dir: &TempDir, app_db: impl Into<std::path::PathBuf>) -> TestApp {
+fn make_app(app_db: impl Into<std::path::PathBuf>) -> TestApp {
     let state = pgpad_web::WebState::new(app_db).expect("failed to create web state");
     let token = state.auth_token().to_string();
-    let router = pgpad_web::router(static_dir.path().to_path_buf(), state);
+    let router = pgpad_web::router(state);
 
     TestApp { router, token }
 }
@@ -101,13 +91,12 @@ fn body_text(body: &Bytes) -> String {
 
 #[tokio::test]
 async fn sqlite_connection_query_flow_works_over_http_commands() {
-    let static_dir = make_static_dir();
     let sqlite_dir = make_sqlite_db();
     let app_dir = tempfile::tempdir().expect("failed to create app dir");
     let app_db = app_dir.path().join("pgpad.db");
     let user_db = sqlite_dir.path().join("user.sqlite");
 
-    let app = make_app(&static_dir, app_db);
+    let app = make_app(app_db);
 
     let _: Value = command_ok(&app, "initialize_connections", json!({})).await;
 
@@ -320,11 +309,10 @@ async fn sqlite_connection_query_flow_works_over_http_commands() {
 
 #[tokio::test]
 async fn api_commands_require_auth_token() {
-    let static_dir = make_static_dir();
     let app_dir = tempfile::tempdir().expect("failed to create app dir");
     let app_db = app_dir.path().join("pgpad.db");
 
-    let app = make_app(&static_dir, app_db);
+    let app = make_app(app_db);
 
     for token in [None, Some("wrong-token")] {
         let (status, body) = command_with_token(
