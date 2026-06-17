@@ -1,11 +1,14 @@
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc, Mutex, RwLock,
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, MutexGuard,
 };
 
 use anyhow::Context;
 use serde_json::value::RawValue;
-use tokio::task::{self, JoinHandle};
+use tokio::{
+    sync::broadcast,
+    task::{self, JoinHandle},
+};
 
 use dashmap::DashMap;
 
@@ -13,7 +16,7 @@ use crate::{
     database::{
         parser::ParsedStatement,
         postgres, sqlite,
-        types::{channel, Page, QueryId, QuerySnapshot, QueryStatus, RuntimeClient},
+        types::{channel, Page, QueryEvent, QueryId, QuerySnapshot, QueryStatus, RuntimeClient},
         QueryExecEvent,
     },
     utils::Condvar,
@@ -22,19 +25,191 @@ use crate::{
 
 /// The storage/state for an individual statement being executed
 struct ExecState {
-    status: AtomicU8,
-    pages: RwLock<Vec<Page>>,
-    error: RwLock<Option<String>>,
-    columns: RwLock<Option<Box<RawValue>>>,
     /// True if this query is expected to return some amount of rows
     /// False if this is a query that will never return anything (e.g. an UPDATE without a RETURNING clause)
-    // TODO(vini): we could refactor this into an enum with a variant with `pages`, `columns`, and one with just `rows_affected`
     returns_values: bool,
-    rows_affected: RwLock<Option<usize>>,
+    inner: Mutex<ExecInner>,
 
     /// If set, the UI can now render the results of this query,
     /// even if it's still on-going (e.g. we already have enough data to render the first page)
     renderable: Condvar,
+}
+
+struct ExecInner {
+    status: QueryStatus,
+    output: ExecOutput,
+    error: Option<String>,
+}
+
+enum ExecOutput {
+    Pending,
+    ResultSet {
+        columns: Option<Box<RawValue>>,
+        pages: Vec<Page>,
+    },
+    Modification {
+        affected_rows: Option<usize>,
+    },
+}
+
+impl ExecState {
+    fn new(returns_values: bool) -> Self {
+        Self {
+            returns_values,
+            inner: Mutex::new(ExecInner {
+                status: QueryStatus::Pending,
+                output: ExecOutput::Pending,
+                error: None,
+            }),
+            renderable: Condvar::new(),
+        }
+    }
+
+    fn inner(&self) -> MutexGuard<'_, ExecInner> {
+        self.inner.lock().expect("Mutex poisoned")
+    }
+
+    fn mark_running(&self) {
+        self.inner().status = QueryStatus::Running;
+    }
+
+    fn set_columns(&self, columns: Box<RawValue>) {
+        let mut inner = self.inner();
+
+        match &mut inner.output {
+            ExecOutput::Pending => {
+                inner.output = ExecOutput::ResultSet {
+                    columns: Some(columns),
+                    pages: vec![],
+                };
+            }
+            ExecOutput::ResultSet {
+                columns: existing, ..
+            } => {
+                *existing = Some(columns);
+            }
+            ExecOutput::Modification { .. } => {}
+        }
+    }
+
+    fn push_page(&self, page: Page) -> (usize, usize) {
+        {
+            let mut inner = self.inner();
+
+            match &mut inner.output {
+                ExecOutput::Pending => {
+                    inner.output = ExecOutput::ResultSet {
+                        columns: None,
+                        pages: vec![page],
+                    };
+                    self.renderable.set();
+                    return (0, 1);
+                }
+                ExecOutput::ResultSet { pages, .. } => {
+                    pages.push(page);
+                    let page_index = pages.len() - 1;
+                    let page_count = pages.len();
+                    self.renderable.set();
+                    return (page_index, page_count);
+                }
+                ExecOutput::Modification { .. } => {}
+            }
+        }
+
+        self.renderable.set();
+        (0, 0)
+    }
+
+    fn finish(&self, affected_rows: usize, error: Option<String>) {
+        {
+            let mut inner = self.inner();
+
+            if let Some(message) = error {
+                inner.status = QueryStatus::Error;
+                inner.error = Some(message);
+            } else {
+                inner.status = QueryStatus::Completed;
+                inner.error = None;
+
+                if self.returns_values {
+                    if matches!(inner.output, ExecOutput::Pending) {
+                        inner.output = ExecOutput::ResultSet {
+                            columns: None,
+                            pages: vec![],
+                        };
+                    }
+                } else {
+                    inner.output = ExecOutput::Modification {
+                        affected_rows: Some(affected_rows),
+                    };
+                }
+            }
+        }
+
+        self.renderable.set();
+    }
+
+    fn snapshot(&self) -> QuerySnapshot {
+        let inner = self.inner();
+
+        match &inner.output {
+            ExecOutput::Pending => QuerySnapshot {
+                returns_values: self.returns_values,
+                status: inner.status,
+                first_page: None,
+                affected_rows: None,
+                error: inner.error.clone(),
+                columns: None,
+            },
+            ExecOutput::ResultSet { columns, pages } => QuerySnapshot {
+                returns_values: true,
+                status: inner.status,
+                first_page: pages.first().cloned(),
+                affected_rows: None,
+                error: inner.error.clone(),
+                columns: columns.clone(),
+            },
+            ExecOutput::Modification { affected_rows } => QuerySnapshot {
+                returns_values: false,
+                status: inner.status,
+                first_page: None,
+                affected_rows: *affected_rows,
+                error: inner.error.clone(),
+                columns: None,
+            },
+        }
+    }
+
+    fn get_columns(&self) -> Option<Box<RawValue>> {
+        let inner = self.inner();
+
+        match &inner.output {
+            ExecOutput::ResultSet { columns, .. } => columns.clone(),
+            ExecOutput::Pending | ExecOutput::Modification { .. } => None,
+        }
+    }
+
+    fn fetch_page(&self, page_idx: usize) -> Option<Page> {
+        let inner = self.inner();
+
+        match &inner.output {
+            ExecOutput::ResultSet { pages, .. } => pages.get(page_idx).cloned(),
+            ExecOutput::Pending | ExecOutput::Modification { .. } => None,
+        }
+    }
+
+    fn get_query_status(&self) -> QueryStatus {
+        self.inner().status
+    }
+
+    fn get_page_count(&self) -> usize {
+        let inner = self.inner();
+
+        match &inner.output {
+            ExecOutput::ResultSet { pages, .. } => pages.len(),
+            ExecOutput::Pending | ExecOutput::Modification { .. } => 0,
+        }
+    }
 }
 
 /// Executes and keeps track of the execution of queries.
@@ -42,6 +217,8 @@ pub struct StatementManager {
     queries: DashMap<QueryId, Arc<ExecState>>,
     /// Handles for tasks spawned by the current batch of queries
     task_handles: Mutex<Vec<JoinHandle<()>>>,
+    query_events_sender: broadcast::Sender<QueryEvent>,
+    next_query_id: AtomicUsize,
 }
 
 impl std::fmt::Debug for StatementManager {
@@ -56,7 +233,13 @@ impl StatementManager {
         Self {
             queries: DashMap::new(),
             task_handles: Mutex::new(Vec::new()),
+            query_events_sender: broadcast::channel(1024).0,
+            next_query_id: AtomicUsize::new(0),
         }
+    }
+
+    pub fn query_events_receiver(&self) -> broadcast::Receiver<QueryEvent> {
+        self.query_events_sender.subscribe()
     }
 
     fn stop_workers(&self) {
@@ -77,13 +260,28 @@ impl StatementManager {
         };
 
         let statements = parse_statements(query)?;
-        let mut query_ids = Vec::with_capacity(statements.len());
-        let mut handles = self.task_handles.lock().unwrap();
 
-        for (idx, statement) in statements.into_iter().enumerate() {
-            let new_handles = self.create_worker(idx as QueryId, client.clone(), statement);
+        let pending_workers: Vec<_> = statements
+            .into_iter()
+            .map(|stmt| {
+                let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
+                (query_id, stmt)
+            })
+            .collect();
+
+        let query_ids = pending_workers
+            .iter()
+            .map(|(query_id, _)| *query_id)
+            .collect::<Vec<_>>();
+
+        let _ = self.query_events_sender.send(QueryEvent::Submitted {
+            query_ids: query_ids.clone(),
+        });
+
+        let mut handles = self.task_handles.lock().unwrap();
+        for (query_id, statement) in pending_workers {
+            let new_handles = self.create_worker(query_id, client.clone(), statement);
             handles.extend(new_handles);
-            query_ids.push(idx);
         }
 
         Ok(query_ids)
@@ -99,51 +297,24 @@ impl StatementManager {
         // Wait for the data to load in
         exec_state.renderable.wait().await;
 
-        let returns_values = exec_state.returns_values;
-
-        let info = QuerySnapshot {
-            returns_values,
-            status: exec_state.status.load(Ordering::Relaxed).into(),
-            first_page: if returns_values {
-                let pages = exec_state.pages.read().expect("RwLock poisoned");
-                pages.first().cloned()
-            } else {
-                None
-            },
-            affected_rows: *exec_state.rows_affected.read().expect("RwLock poisoned"),
-            error: exec_state.error.read().expect("RwLock poisoned").clone(),
-            columns: exec_state.columns.read().expect("RwLock poisoned").clone(),
-        };
-
-        Ok(info)
+        Ok(exec_state.snapshot())
     }
 
     pub fn get_columns(&self, query_id: QueryId) -> Result<Option<Box<RawValue>>, Error> {
-        Ok(self
-            .get(query_id)?
-            .columns
-            .read()
-            .expect("RwLock poisoned")
-            .clone())
+        Ok(self.get(query_id)?.get_columns())
     }
 
     /// Fetches a page of results for a given query.
     pub fn fetch_page(&self, query_id: QueryId, page_idx: usize) -> Result<Option<Page>, Error> {
-        let exec_state = self.get(query_id)?;
-        let pages = exec_state.pages.read().expect("RwLock poisoned");
-        Ok(pages.get(page_idx).cloned())
+        Ok(self.get(query_id)?.fetch_page(page_idx))
     }
 
     pub fn get_query_status(&self, query_id: QueryId) -> Result<QueryStatus, Error> {
-        let exec_state = self.get(query_id)?;
-
-        Ok(exec_state.status.load(Ordering::Relaxed).into())
+        Ok(self.get(query_id)?.get_query_status())
     }
 
     pub fn get_page_count(&self, query_id: QueryId) -> Result<usize, Error> {
-        let exec_state = self.get(query_id)?;
-        let page_count = exec_state.pages.read().expect("RwLock poisoned").len();
-        Ok(page_count)
+        Ok(self.get(query_id)?.get_page_count())
     }
 }
 
@@ -155,18 +326,10 @@ impl StatementManager {
         client: RuntimeClient,
         stmt: ParsedStatement,
     ) -> [JoinHandle<()>; 2] {
-        let exec_storage = ExecState {
-            status: AtomicU8::new(QueryStatus::Pending as u8),
-            pages: RwLock::new(vec![]),
-            error: RwLock::new(None),
-            columns: RwLock::new(None),
-            returns_values: stmt.returns_values,
-            rows_affected: RwLock::new(None),
-            renderable: Condvar::new(),
-        };
-
+        let exec_storage = ExecState::new(stmt.returns_values);
         let exec_storage = Arc::new(exec_storage);
         self.queries.insert(id, exec_storage.clone());
+        let query_events_sender = self.query_events_sender.clone();
 
         let (sender, recv) = channel();
 
@@ -187,41 +350,42 @@ impl StatementManager {
         let receiver_handle = task::spawn(async move {
             let mut recv = recv;
 
-            exec_storage
-                .status
-                .store(QueryStatus::Running as u8, Ordering::Relaxed);
+            exec_storage.mark_running();
 
             while let Some(event) = recv.recv().await {
                 match event {
                     QueryExecEvent::TypesResolved { columns } => {
-                        *exec_storage.columns.write().unwrap() = Some(columns);
+                        let event_columns = columns.clone();
+                        exec_storage.set_columns(columns);
+                        let _ = query_events_sender.send(QueryEvent::ColumnsReady {
+                            query_id: id,
+                            columns: event_columns,
+                        });
                     }
                     QueryExecEvent::Page {
                         page_amount: _,
                         page,
                     } => {
-                        exec_storage.pages.write().unwrap().push(page);
-                        exec_storage.renderable.set();
+                        let (page_index, page_count) = exec_storage.push_page(page);
+                        let _ = query_events_sender.send(QueryEvent::PageReady {
+                            query_id: id,
+                            page_index,
+                            page_count,
+                        });
                     }
                     QueryExecEvent::Finished {
                         elapsed_ms: _,
                         affected_rows,
                         error,
                     } => {
-                        if let Some(err) = error {
-                            *exec_storage.error.write().unwrap() = Some(err);
-                            exec_storage
-                                .status
-                                .store(QueryStatus::Error as u8, Ordering::Relaxed);
-                        } else {
-                            exec_storage
-                                .status
-                                .store(QueryStatus::Completed as u8, Ordering::Relaxed);
-
-                            *exec_storage.rows_affected.write().unwrap() = Some(affected_rows);
-                        }
-
-                        exec_storage.renderable.set();
+                        let event_error = error.clone();
+                        exec_storage.finish(affected_rows, error);
+                        let _ = query_events_sender.send(QueryEvent::Finished {
+                            query_id: id,
+                            status: exec_storage.get_query_status(),
+                            affected_rows: (!exec_storage.returns_values).then_some(affected_rows),
+                            error: event_error,
+                        });
 
                         // TODO(vini): fingerprint query here, and save it?
 
@@ -248,8 +412,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use serde_json::{json, value::RawValue};
+    use tokio::sync::broadcast;
 
-    use crate::database::types::RuntimeClient;
+    use crate::database::types::{QueryEvent, QueryStatus, RuntimeClient};
 
     use super::StatementManager;
 
@@ -269,9 +434,7 @@ mod tests {
     async fn run_query(query: &str) -> (Box<RawValue>, Box<RawValue>) {
         let stmt_manager = StatementManager::new();
 
-        let client = RuntimeClient::SQLite {
-            connection: Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())),
-        };
+        let client = sqlite_client();
         let query_ids = stmt_manager.submit_query(client, query).unwrap();
         assert_eq!(query_ids, vec![0]);
 
@@ -310,5 +473,176 @@ mod tests {
             csv_export,
             "id,name,price\n1,\"apple\",0.99\n2,\"banana\",1.25\n3,\"cherry\",2.5\n"
         );
+    }
+
+    #[tokio::test]
+    async fn emits_events_for_select_query() {
+        let stmt_manager = StatementManager::new();
+        let mut events = stmt_manager.query_events_receiver();
+        let query_ids = stmt_manager
+            .submit_query(sqlite_client(), "SELECT 1 AS value")
+            .unwrap();
+
+        let events = collect_events_until_finished(&mut events, query_ids[0]).await;
+
+        assert!(matches!(
+            &events[0],
+            QueryEvent::Submitted { query_ids: ids } if ids == &query_ids
+        ));
+        assert!(matches!(
+            &events[1],
+            QueryEvent::ColumnsReady { query_id, columns }
+                if *query_id == query_ids[0]
+                    && serde_json::from_str::<serde_json::Value>(columns.get()).unwrap()
+                        == json!(["value"])
+        ));
+        assert!(matches!(
+            &events[2],
+            QueryEvent::PageReady {
+                query_id,
+                page_index,
+                page_count,
+            } if *query_id == query_ids[0] && *page_index == 0 && *page_count == 1
+        ));
+        assert!(matches!(
+            &events[3],
+            QueryEvent::Finished {
+                query_id,
+                status: QueryStatus::Completed,
+                affected_rows: None,
+                error: None,
+            } if *query_id == query_ids[0]
+        ));
+    }
+
+    #[tokio::test]
+    async fn submitted_event_precedes_multi_statement_result_events() {
+        let stmt_manager = StatementManager::new();
+        let mut events = stmt_manager.query_events_receiver();
+        let query_ids = stmt_manager
+            .submit_query(sqlite_client(), "SELECT 1; SELECT 2; SELECT 3; SELECT 4;")
+            .unwrap();
+
+        let first_event = events.recv().await.unwrap();
+
+        assert!(matches!(
+            first_event,
+            QueryEvent::Submitted { query_ids: ids } if ids == query_ids
+        ));
+    }
+
+    #[tokio::test]
+    async fn emits_events_for_modification_query() {
+        let stmt_manager = StatementManager::new();
+        let mut events = stmt_manager.query_events_receiver();
+        let query_ids = stmt_manager
+            .submit_query(sqlite_client(), "CREATE TABLE items (id INTEGER);")
+            .unwrap();
+
+        let events = collect_events_until_finished(&mut events, query_ids[0]).await;
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            QueryEvent::Submitted { query_ids: ids } if ids == &query_ids
+        ));
+        assert!(matches!(
+            &events[1],
+            QueryEvent::Finished {
+                query_id,
+                status: QueryStatus::Completed,
+                affected_rows: Some(0),
+                error: None,
+            } if *query_id == query_ids[0]
+        ));
+    }
+
+    #[tokio::test]
+    async fn emits_error_event_for_invalid_query() {
+        let stmt_manager = StatementManager::new();
+        let mut events = stmt_manager.query_events_receiver();
+        let query_ids = stmt_manager
+            .submit_query(sqlite_client(), "SELECT * FROM missing_table")
+            .unwrap();
+
+        let events = collect_events_until_finished(&mut events, query_ids[0]).await;
+        let finished = events.last().unwrap();
+
+        assert!(matches!(
+            finished,
+            QueryEvent::Finished {
+                query_id,
+                status: QueryStatus::Error,
+                affected_rows: None,
+                error: Some(message),
+            } if *query_id == query_ids[0] && message.contains("missing_table")
+        ));
+    }
+
+    #[tokio::test]
+    async fn emits_page_ready_for_each_result_page() {
+        let stmt_manager = StatementManager::new();
+        let mut events = stmt_manager.query_events_receiver();
+        let query_ids = stmt_manager
+            .submit_query(
+                sqlite_client(),
+                "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM t WHERE x < 155) SELECT * FROM t;",
+            )
+            .unwrap();
+
+        let events = collect_events_until_finished(&mut events, query_ids[0]).await;
+        let page_events = events
+            .iter()
+            .filter_map(|event| match event {
+                QueryEvent::PageReady {
+                    query_id,
+                    page_index,
+                    page_count,
+                } => Some((*query_id, *page_index, *page_count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            page_events,
+            vec![
+                (query_ids[0], 0, 1),
+                (query_ids[0], 1, 2),
+                (query_ids[0], 2, 3),
+                (query_ids[0], 3, 4),
+            ]
+        );
+    }
+
+    fn sqlite_client() -> RuntimeClient {
+        RuntimeClient::SQLite {
+            connection: Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap())),
+        }
+    }
+
+    async fn collect_events_until_finished(
+        events: &mut broadcast::Receiver<QueryEvent>,
+        query_id: usize,
+    ) -> Vec<QueryEvent> {
+        let mut collected = vec![];
+
+        loop {
+            let event = events.recv().await.unwrap();
+            let is_finished = matches!(
+                &event,
+                QueryEvent::Finished {
+                    query_id: finished_query_id,
+                    ..
+                } if *finished_query_id == query_id
+            );
+
+            collected.push(event);
+
+            if is_finished {
+                break;
+            }
+        }
+
+        collected
     }
 }
